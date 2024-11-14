@@ -1,8 +1,9 @@
 import pandas as pd
 import os
+import re
 from tqdm import tqdm
 
-def read_bim_file(bim_file):
+def read_bim_file(bim_file, target_chrom='22'):
     """
     Reads the BIM file and returns a set of (chrom, pos) tuples and a DataFrame.
     """
@@ -19,13 +20,18 @@ def read_bim_file(bim_file):
         )
         # Remove 'chr' prefix from chromosome
         bim_df['chrom'] = bim_df['chrom'].str.replace('chr', '', case=False).str.strip()
-        # Extract position from 'variant' (assuming format 'chr:pos:allele1:allele2')
-        split_variants = bim_df['variant'].str.split(':', expand=True)
-        bim_df['chrom_variant'] = split_variants[0].str.replace('chr', '', case=False).str.strip()
-        bim_df['pos_variant'] = split_variants[1].str.strip()
+        
+        # Extract position from 'variant' (assuming format 'chrom:pos:allele1:allele2')
+        bim_split = bim_df['variant'].str.split(':', expand=True)
+        bim_df['chrom_variant'] = bim_split[0].str.replace('chr', '', case=False).str.strip()
+        bim_df['pos_variant'] = bim_split[1].str.strip()
+        
+        # Filter to target chromosome
+        bim_df = bim_df[bim_df['chrom_variant'] == target_chrom]
+        
         # Create set of (chrom, pos)
         bim_positions = set(zip(bim_df['chrom_variant'], bim_df['pos_variant']))
-        print(f"Total positions in BIM file: {len(bim_positions)}\n")
+        print(f"Total positions in BIM file for chr{target_chrom}: {len(bim_positions)}\n")
         return bim_positions, bim_df
     except Exception as e:
         print(f"Error reading BIM file: {e}")
@@ -47,6 +53,7 @@ def read_weights_file(weights_file, target_chrom='22'):
         weights_df['chr'] = weights_df['chr'].str.replace('chr', '', case=False).str.strip()
         weights_df['pos'] = weights_df['pos'].str.strip()
         weights_df = weights_df[weights_df['chr'] == target_chrom]
+        
         # Get unique positions
         weights_positions = set(zip(weights_df['chr'], weights_df['pos']))
         total_weights_positions = len(weights_positions)
@@ -87,44 +94,33 @@ def collect_examples(weights_df, matched_positions, bim_df, example_limit=5):
     example_non_matches = []
     
     # For matches
-    if matched_positions:
-        matched_list = list(matched_positions)[:example_limit]
-        for variant in matched_list:
-            chr_, pos = variant
-            # Fetch corresponding row from weights_df
-            weight_row = weights_df[(weights_df['chr'] == chr_) & (weights_df['pos'] == pos)].iloc[0]
-            # Fetch corresponding row from bim_df
-            bim_row = bim_df[(bim_df['chrom_variant'] == chr_) & (bim_df['pos_variant'] == pos)].iloc[0]
-            # Replace alleles with 'X' for privacy
-            allele1_repl = bim_row['allele1'].replace('[ACTG]', 'X', regex=True)
-            allele2_repl = bim_row['allele2'].replace('[ACTG]', 'X', regex=True)
-            variant_repl = f"{bim_row['chrom_variant']}:{bim_row['pos_variant']}:{allele1_repl}:{allele2_repl}"
-            example_matches.append({
-                'weights_chr': weight_row['chr'],
-                'weights_pos': weight_row['pos'],
-                'weights_effect_allele': weight_row['effect_allele'],
-                'weights_weight': weight_row['weight'],
-                'weights_id': weight_row['id'],
-                'bim_chrom': bim_row['chrom'],
-                'bim_pos': bim_row['pos_variant'],
-                'bim_variant': variant_repl
-            })
+    matched_df = weights_df[weights_df.set_index(['chr', 'pos']).index.isin(matched_positions)]
+    
+    # Merge with BIM DataFrame
+    if not bim_df.empty and not matched_df.empty:
+        # Set index for faster lookup
+        bim_df_indexed = bim_df.set_index(['chrom_variant', 'pos_variant'])
+        matched_df_indexed = matched_df.set_index(['chr', 'pos'])
+        
+        # Perform join
+        merged_df = matched_df_indexed.join(bim_df_indexed, how='left', lsuffix='_weights', rsuffix='_bim')
+        
+        # Replace alleles with 'X' using regex
+        merged_df['allele1_repl'] = merged_df['allele1'].apply(lambda x: re.sub(r'[ACTG]', 'X', x))
+        merged_df['allele2_repl'] = merged_df['allele2'].apply(lambda x: re.sub(r'[ACTG]', 'X', x))
+        
+        # Create variant string with X
+        merged_df['variant_repl'] = merged_df.index.get_level_values('chr') + ':' + \
+                                     merged_df.index.get_level_values('pos') + ':' + \
+                                     merged_df['allele1_repl'] + ':' + merged_df['allele2_repl']
+        
+        # Take first example_limit rows
+        example_matches = merged_df.head(example_limit).to_dict('records')
     
     # For non-matches
     non_matched_positions = weights_positions - matched_positions
-    non_matched_list = list(non_matched_positions)[:example_limit]
-    for variant in non_matched_list:
-        chr_, pos = variant
-        # Fetch corresponding row from weights_df
-        weight_row = weights_df[(weights_df['chr'] == chr_) & (weights_df['pos'] == pos)].iloc[0]
-        example_non_matches.append({
-            'weights_chr': weight_row['chr'],
-            'weights_pos': weight_row['pos'],
-            'weights_effect_allele': weight_row['effect_allele'],
-            'weights_weight': weight_row['weight'],
-            'weights_id': weight_row['id'],
-            'match_status': 'No Match'
-        })
+    non_matched_df = weights_df[weights_df.set_index(['chr', 'pos']).index.isin(non_matched_positions)]
+    example_non_matches = non_matched_df.head(example_limit).to_dict('records')
     
     return example_matches, example_non_matches
 
@@ -142,13 +138,13 @@ def main():
         return
     
     # Read BIM file
-    bim_positions, bim_df = read_bim_file(bim_file)
+    bim_positions, bim_df = read_bim_file(bim_file, target_chrom=target_chrom)
     
     # Read weights file
     weights_df, weights_positions = read_weights_file(weights_file, target_chrom=target_chrom)
     
     if not weights_positions:
-        print("No positions found in weights file for chromosome 22. Exiting.")
+        print(f"No positions found in weights file for chromosome {target_chrom}. Exiting.")
         return
     
     # Find matches
@@ -166,9 +162,9 @@ def main():
     if example_matches:
         print("Example Matches:")
         for match in example_matches:
-            print(f"  Weights File - Chromosome: {match['weights_chr']}, Position: {match['weights_pos']}, "
-                  f"Effect Allele: {match['weights_effect_allele']}, Weight: {match['weights_weight']}, ID: {match['weights_id']}")
-            print(f"  BIM File - Chromosome: {match['bim_chrom']}, Position: {match['bim_pos']}, Variant: {match['bim_variant']}\n")
+            print(f"  Weights File - Chromosome: {match['chr']}, Position: {match['pos']}, "
+                  f"Effect Allele: {match['effect_allele']}, Weight: {match['weight']}, ID: {match['id']}")
+            print(f"  BIM File - Chromosome: {match['chrom_variant']}, Position: {match['pos_variant']}, Variant: {match['variant_repl']}\n")
     else:
         print("No example matches found.\n")
     
@@ -176,9 +172,9 @@ def main():
     if example_non_matches:
         print("Example Non-Matches (from Weights File):")
         for non_match in example_non_matches:
-            print(f"  Chromosome: {non_match['weights_chr']}, Position: {non_match['weights_pos']}, "
-                  f"Effect Allele: {non_match['weights_effect_allele']}, Weight: {non_match['weights_weight']}, "
-                  f"ID: {non_match['weights_id']}, Match Status: {non_match['match_status']}\n")
+            print(f"  Chromosome: {non_match['chr']}, Position: {non_match['pos']}, "
+                  f"Effect Allele: {non_match['effect_allele']}, Weight: {non_match['weight']}, "
+                  f"ID: {non_match['id']}, Match Status: No Match\n")
     else:
         print("No example non-matches found.\n")
 
