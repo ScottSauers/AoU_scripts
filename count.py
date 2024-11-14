@@ -9,7 +9,7 @@ def get_optimal_chunksize(file_path, memory_fraction=0.1):
     return int((available_memory * memory_fraction) / estimated_row_size)
 
 def count_common_variants(weights_file, bim_file):
-    weights_data = pd.read_csv(weights_file, usecols=["chr", "pos"])
+    weights_data = pd.read_csv(weights_file, usecols=[0, 1], names=["chr", "pos"], skiprows=1)
     weights_data["chr"] = weights_data["chr"].astype(str).str.replace("chr", "")
     weights_data["pos"] = weights_data["pos"].astype(str).str.strip()
     total_weights_variants = len(weights_data)
