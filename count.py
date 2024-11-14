@@ -6,6 +6,7 @@ from tqdm import tqdm
 def read_bim_file(bim_file, target_chrom='22'):
     """
     Reads the BIM file and returns a set of (chrom, pos) tuples and a DataFrame.
+    Only considers the target chromosome.
     """
     print("Reading BIM file...")
     try:
@@ -84,7 +85,7 @@ def find_matches(weights_positions, bim_positions):
     print(f"Percentage of matched positions: {percentage:.2f}% out of {total} total positions in weights file\n")
     return matched_positions, matched_count, percentage
 
-def collect_examples(weights_df, matched_positions, bim_df, example_limit=5):
+def collect_examples(weights_df, matched_positions, bim_df, weights_positions, example_limit=5):
     """
     Collects example matches and non-matches.
     Returns lists of example matches and non-matches.
@@ -94,7 +95,7 @@ def collect_examples(weights_df, matched_positions, bim_df, example_limit=5):
     example_non_matches = []
     
     # For matches
-    matched_df = weights_df[weights_df.set_index(['chr', 'pos']).index.isin(matched_positions)]
+    matched_df = weights_df[weights_df.set_index(['chr', 'pos']).index.isin(matched_positions)].copy()
     
     # Merge with BIM DataFrame
     if not bim_df.empty and not matched_df.empty:
@@ -102,17 +103,21 @@ def collect_examples(weights_df, matched_positions, bim_df, example_limit=5):
         bim_df_indexed = bim_df.set_index(['chrom_variant', 'pos_variant'])
         matched_df_indexed = matched_df.set_index(['chr', 'pos'])
         
+        # Rename bim_df_indexed index to match matched_df_indexed
+        bim_df_indexed.index.names = ['chr', 'pos']
+        
         # Perform join
         merged_df = matched_df_indexed.join(bim_df_indexed, how='left', lsuffix='_weights', rsuffix='_bim')
         
+        # Reset index to access 'chr' and 'pos' as columns
+        merged_df = merged_df.reset_index()
+        
         # Replace alleles with 'X' using regex
-        merged_df['allele1_repl'] = merged_df['allele1'].apply(lambda x: re.sub(r'[ACTG]', 'X', x))
-        merged_df['allele2_repl'] = merged_df['allele2'].apply(lambda x: re.sub(r'[ACTG]', 'X', x))
+        merged_df['allele1_repl'] = merged_df['allele1'].str.replace('[ACTG]', 'X', regex=True)
+        merged_df['allele2_repl'] = merged_df['allele2'].str.replace('[ACTG]', 'X', regex=True)
         
         # Create variant string with X
-        merged_df['variant_repl'] = merged_df.index.get_level_values('chr') + ':' + \
-                                     merged_df.index.get_level_values('pos') + ':' + \
-                                     merged_df['allele1_repl'] + ':' + merged_df['allele2_repl']
+        merged_df['variant_repl'] = merged_df['chr'] + ':' + merged_df['pos'] + ':' + merged_df['allele1_repl'] + ':' + merged_df['allele2_repl']
         
         # Take first example_limit rows
         example_matches = merged_df.head(example_limit).to_dict('records')
@@ -151,7 +156,7 @@ def main():
     matched_positions, matched_count, percentage = find_matches(weights_positions, bim_positions)
     
     # Collect examples
-    example_matches, example_non_matches = collect_examples(weights_df, matched_positions, bim_df, example_limit=5)
+    example_matches, example_non_matches = collect_examples(weights_df, matched_positions, bim_df, weights_positions, example_limit=5)
     
     # Print results
     print("Processing complete.")
@@ -164,7 +169,7 @@ def main():
         for match in example_matches:
             print(f"  Weights File - Chromosome: {match['chr']}, Position: {match['pos']}, "
                   f"Effect Allele: {match['effect_allele']}, Weight: {match['weight']}, ID: {match['id']}")
-            print(f"  BIM File - Chromosome: {match['chrom_variant']}, Position: {match['pos_variant']}, Variant: {match['variant_repl']}\n")
+            print(f"  BIM File - Chromosome: {match['chr']}, Position: {match['pos']}, Variant: {match['variant_repl']}\n")
     else:
         print("No example matches found.\n")
     
